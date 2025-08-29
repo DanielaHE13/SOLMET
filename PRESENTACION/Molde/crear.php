@@ -1,0 +1,252 @@
+<?php
+if (session_status() === PHP_SESSION_NONE) session_start();
+
+require_once __DIR__ . '/../../persistencia/Conexion.php';
+
+/* ---- Autorización (solo admin puede crear) ---- */
+$rol = $_SESSION['rol'] ?? null;
+if ($rol !== 'admin') {
+  include __DIR__ . '/../Noautorizado.php';
+  exit;
+}
+
+/* ---- Menú ---- */
+include_once __DIR__ . '/../Admin/menuAdmin.php';
+
+/* ---- Helpers ---- */
+function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
+function ok($m){ return '<div class="alert alert-success my-2">'.$m.'</div>'; }
+function err($m){ return '<div class="alert alert-danger my-2">'.$m.'</div>'; }
+function is_valid_id($s){ return (bool)preg_match('/^[A-Za-z0-9\-\_]{1,25}$/', $s); }
+function to_decimal($s){
+  // Acepta 10,5 10.5 10,500.330 → normaliza a punto
+  $s = trim((string)$s);
+  $s = str_replace([' ', ','], ['', '.'], $s);
+  return is_numeric($s) ? (string)$s : '';
+}
+
+/* ---- CSRF ---- */
+if (empty($_SESSION['csrf'])) $_SESSION['csrf'] = bin2hex(random_bytes(16));
+$csrf = $_SESSION['csrf'];
+
+/* ---- Estados permitidos ---- */
+$ESTADOS = ['disponible','mantenimiento','fuera_servicio'];
+
+/* ---- POST handler ---- */
+$errors = [];
+$okMsg  = '';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+  $tkn  = $_POST['csrf'] ?? '';
+  if (!hash_equals($csrf, $tkn)) {
+    $errors[] = 'Token de seguridad inválido. Recarga la página.';
+  } else {
+    $id_molde      = trim($_POST['id_molde'] ?? '');
+    $nombre        = trim($_POST['nombre'] ?? '');
+    $peso_colada_s = to_decimal($_POST['peso_colada_g'] ?? '');
+    $estado        = trim($_POST['estado'] ?? 'disponible');
+
+    // Validaciones
+    if ($id_molde === '' || !is_valid_id($id_molde)) {
+      $errors[] = 'ID de molde requerido (máx 25, solo letras/números/guion/guion bajo).';
+    }
+    if ($nombre === '') {
+      $errors[] = 'El nombre es requerido.';
+    }
+    if ($peso_colada_s === '') {
+      $errors[] = 'El peso de colada (g/tiro) es requerido y debe ser numérico.';
+    }
+    $peso_colada = $peso_colada_s !== '' ? (float)$peso_colada_s : null;
+    if ($peso_colada !== null && ($peso_colada < 0 || $peso_colada > 1000000)) {
+      $errors[] = 'El peso de colada debe estar entre 0 y 1.000.000.';
+    }
+    if (!in_array($estado, $ESTADOS, true)) {
+      $estado = 'disponible';
+    }
+
+    if (!$errors) {
+      $cx = new Conexion();
+      try {
+        $cx->abrir();
+
+        // ¿Existe ya?
+        $cx->ejecutar("SELECT 1 FROM molde WHERE id_molde = ?", [$id_molde]);
+        if ($cx->registro()) {
+          $errors[] = 'Ya existe un molde con ese ID.';
+        } else {
+          // Insert
+          $sql = "INSERT INTO molde (id_molde, nombre, peso_colada_g, estado)
+                  VALUES (?, ?, ?, ?)";
+          $cx->ejecutar($sql, [$id_molde, $nombre, $peso_colada, $estado]);
+
+          $okMsg = '¡Molde creado correctamente!';
+          // Limpiar el form (deja estado por defecto)
+          $_POST = ['estado' => 'disponible'];
+        }
+      } catch (Throwable $e) {
+        $errors[] = 'Error al guardar: '.$e->getMessage();
+      } finally {
+        $cx->cerrar();
+      }
+    }
+  }
+}
+
+/* ---- URLS ---- */
+$URL_LISTAR = '?pid=' . base64_encode('PRESENTACION/Molde/listar.php');
+?>
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Crear Molde</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="stylesheet" href="/assets/bootstrap.min.css">
+  <link rel="stylesheet" href="/assets/fontawesome.min.css">
+  <style>
+  :root{
+    --g50:#f3fbf7; --g100:#e7f6ee; --g200:#d6f0e0; --g300:#c4ead3;
+    --g600:#1ea257; --g700:#188249; --g800:#0f5a32;
+    --txt:#28323a; --muted:#6c7b86; --border:#e3eee7;
+    --shadow:0 8px 24px rgba(16,80,54,.08);
+  }
+  html,body{ min-height:100vh; }
+  body{
+    background:
+      radial-gradient(1200px 200px at -20% -50%, #ffffff 0%, transparent 60%),
+      linear-gradient(135deg, var(--g100) 0%, var(--g50) 60%, #fff 100%);
+    background-attachment:fixed;
+    color:var(--txt);
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,"Noto Sans","Liberation Sans",sans-serif;
+  }
+  .page-wrap{ color:var(--txt); }
+
+  /* Hero */
+  .hero{ border-radius:18px; border:1px solid var(--border); box-shadow:var(--shadow); padding:18px; background:#fff; }
+  .eyebrow{ letter-spacing:.12em; font-size:.75rem; color:var(--g700); font-weight:700; text-transform:uppercase; }
+  .hero-title{ font-weight:800; color:var(--g800); }
+
+  /* Card */
+  .card-elev{ background:#fff; border:1px solid var(--border); border-radius:18px; box-shadow:var(--shadow); overflow:hidden; }
+  .card-elev .card-body{ padding:18px; }
+  .card-head{
+    padding:12px 16px; font-weight:800; color:var(--g800);
+    background:linear-gradient(0deg, var(--g50), #fff); border-bottom:1px solid var(--border);
+  }
+  .card-head i{ color:var(--g600); }
+
+  /* Inputs */
+  .soft-input{ border-radius:12px; border:1px solid #dfeae4; background:#fff; transition:.2s ease; }
+  .soft-input:focus{ border-color:var(--g600); box-shadow:0 0 0 .2rem rgba(33,178,107,.12); }
+  .input-hint{ font-size:.82rem; color:var(--muted); }
+
+  /* Buttons */
+  .btn-accent{ background:var(--g600); border-color:var(--g600); color:#fff; border-radius:12px; }
+  .btn-accent:hover{ background:var(--g700); border-color:var(--g700); color:#fff; }
+  .btn-ghost{ background:#fff; border:1px solid var(--border); border-radius:12px; }
+  .btn-ghost:hover{ background:var(--g100); }
+  </style>
+</head>
+<body>
+<div class="container-xxl px-3 px-md-4 px-lg-5 my-3 page-wrap">
+
+  <!-- HERO -->
+  <div class="hero mb-3">
+    <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+      <div>
+        <div class="eyebrow mb-1">Moldes</div>
+        <h3 class="hero-title mb-0">Crear molde</h3>
+      </div>
+      <div class="d-flex gap-2">
+        <a class="btn btn-ghost" href="<?= h($URL_LISTAR) ?>">
+          <i class="fa-solid fa-list me-1"></i> Listado
+        </a>
+      </div>
+    </div>
+
+    <?php
+      if ($okMsg)   echo ok(h($okMsg));
+      foreach ($errors as $e) echo err(h($e));
+    ?>
+  </div>
+
+  <!-- FORM -->
+  <div class="card-elev">
+    <div class="card-head">
+      <i class="fa-solid fa-cube me-1"></i> Datos del molde
+    </div>
+    <div class="card-body">
+      <form method="post" class="row g-3">
+        <input type="hidden" name="csrf" value="<?= h($csrf) ?>">
+
+        <div class="col-12 col-md-4">
+          <label class="form-label">ID de molde</label>
+          <input
+            type="text"
+            name="id_molde"
+            maxlength="25"
+            class="form-control soft-input"
+            value="<?= h($_POST['id_molde'] ?? '') ?>"
+            placeholder="Ej: MCO20015"
+            required
+          >
+          <div class="input-hint mt-1">Máx 25 caracteres (letras, números, guion y guion bajo).</div>
+        </div>
+
+        <div class="col-12 col-md-6">
+          <label class="form-label">Nombre</label>
+          <input
+            type="text"
+            name="nombre"
+            maxlength="100"
+            class="form-control soft-input"
+            value="<?= h($_POST['nombre'] ?? '') ?>"
+            placeholder="Ej: COLLARES_2&quot;"
+            required
+          >
+        </div>
+
+        <div class="col-12 col-md-3">
+          <label class="form-label">Peso colada (g/tiro)</label>
+          <input
+            type="number"
+            step="0.001"
+            min="0"
+            max="1000000"
+            inputmode="decimal"
+            name="peso_colada_g"
+            class="form-control soft-input"
+            value="<?= h($_POST['peso_colada_g'] ?? '') ?>"
+            placeholder="Ej: 6.300"
+            required
+          >
+          <div class="input-hint mt-1">Usa punto o coma. Se guarda con punto y hasta 3 decimales.</div>
+        </div>
+
+        <div class="col-12 col-md-3">
+          <label class="form-label">Estado</label>
+          <select name="estado" class="form-select soft-input">
+            <?php
+              $sel = $_POST['estado'] ?? 'disponible';
+              foreach ($ESTADOS as $op){
+                $s = $sel===$op ? 'selected' : '';
+                echo '<option value="'.h($op).'" '.$s.'>'.h(ucfirst(str_replace('_',' ', $op))).'</option>';
+              }
+            ?>
+          </select>
+        </div>
+
+        <div class="col-12 d-flex gap-2 mt-2">
+          <button class="btn btn-accent">
+            <i class="fa-solid fa-floppy-disk me-1"></i> Guardar
+          </button>
+          <a class="btn btn-ghost" href="<?= h($URL_LISTAR) ?>">
+            <i class="fa-solid fa-list me-1"></i> Ir al listado
+          </a>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+</body>
+</html>
